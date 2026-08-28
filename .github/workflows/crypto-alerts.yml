@@ -36,4 +36,4 @@ jobs:
           MAX_RSI: "70"
           MIN_REL_VOLUME: "1.5"
           MIN_RR: "2.0"
-        run: python alert_worker.py
+        run: python test_telegram.py
