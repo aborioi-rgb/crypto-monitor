@@ -3,7 +3,7 @@ name: Crypto Monitor Alerts
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
@@ -36,4 +36,4 @@ jobs:
           MAX_RSI: "70"
           MIN_REL_VOLUME: "1.5"
           MIN_RR: "2.0"
-        run: python test_telegram.py
+        run: python alert_worker.py
