@@ -40,4 +40,4 @@ jobs:
           MIN_REL_VOLUME: "1.5"
           MIN_RR: "2.0"
           SIGNAL_EXPIRY_HOURS: "12"
-        run: python alert_worker.py
+        run: python test_supabase.py
