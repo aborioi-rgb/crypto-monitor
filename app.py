@@ -1,4 +1,3 @@
-
 import json
 import os
 from pathlib import Path
@@ -85,6 +84,7 @@ with st.sidebar:
             "Oportunidades",
             "Señales activas",
             "Historial y performance",
+            "Calidad de señales",
             "Radar de mercado",
             "Evolución de scores",
             "Alertas",
@@ -251,6 +251,146 @@ signals_raw, events, supabase_error = get_signal_data()
 signals = parse_signals(signals_raw)
 perf = performance_metrics(signals)
 
+
+def classify_score_bucket(score):
+    if pd.isna(score):
+        return "Sin score"
+    score = float(score)
+    if score >= 92:
+        return "92+"
+    if score >= 88:
+        return "88–91.9"
+    if score >= 84:
+        return "84–87.9"
+    return "<84"
+
+def classify_rsi_bucket(rsi):
+    if pd.isna(rsi):
+        return "Sin RSI"
+    rsi = float(rsi)
+    if rsi < 55:
+        return "<55"
+    if rsi < 60:
+        return "55–59.9"
+    if rsi < 65:
+        return "60–64.9"
+    if rsi <= 70:
+        return "65–70"
+    return ">70"
+
+def classify_volume_bucket(v):
+    if pd.isna(v):
+        return "Sin dato"
+    v = float(v)
+    if v < 1.5:
+        return "<1.5x"
+    if v < 2.0:
+        return "1.5–1.99x"
+    if v < 3.0:
+        return "2.0–2.99x"
+    return "3.0x+"
+
+def resolved_only(signals):
+    if signals.empty:
+        return signals.copy()
+    return signals[signals["status"].isin(["TP2","TP1_BE","STOP"])].copy()
+
+def add_r_result(df):
+    x = df.copy()
+    if x.empty:
+        x["R"] = []
+        return x
+    x["R"] = x["status"].map({"TP2":2.0,"TP1_BE":0.75,"STOP":-1.0}).fillna(0.0)
+    return x
+
+def group_quality_table(signals, group_col, label):
+    base = resolved_only(signals)
+    if base.empty or group_col not in base.columns:
+        return pd.DataFrame()
+
+    base = add_r_result(base)
+    rows = []
+    for key, g in base.groupby(group_col, dropna=False):
+        total = len(g)
+        wins = int(g["status"].isin(["TP2","TP1_BE"]).sum())
+        stops = int((g["status"]=="STOP").sum())
+        tp2 = int((g["status"]=="TP2").sum())
+        partial = int((g["status"]=="TP1_BE").sum())
+        tp1_any = int(g.get("tp1_hit", pd.Series(False, index=g.index)).fillna(False).astype(bool).sum())
+        r_total = float(g["R"].sum())
+        win_rate = wins / total * 100 if total else 0.0
+        rows.append({
+            label: str(key),
+            "Señales": total,
+            "Ganadoras": wins,
+            "Stops": stops,
+            "TP1 %": round(tp1_any / total * 100, 1) if total else 0.0,
+            "TP2 %": round(tp2 / total * 100, 1) if total else 0.0,
+            "TP1+BE %": round(partial / total * 100, 1) if total else 0.0,
+            "Win rate %": round(win_rate, 1),
+            "R acumulado": round(r_total, 2),
+            "R promedio": round(r_total / total, 3) if total else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+def quality_analysis(signals):
+    if signals.empty:
+        return {}
+
+    q = signals.copy()
+    q["Rango score"] = q["score"].map(classify_score_bucket)
+    q["Rango RSI"] = q["rsi_15m"].map(classify_rsi_bucket)
+    q["Rango volumen"] = q["relative_volume"].map(classify_volume_bucket)
+    q["Cross"] = q["cross_confirmed"].fillna(False).map({True:"Sí", False:"No"})
+
+    return {
+        "score": group_quality_table(q, "Rango score", "Rango score"),
+        "exchange": group_quality_table(q, "exchange", "Exchange"),
+        "cross": group_quality_table(q, "Cross", "Cross"),
+        "rsi": group_quality_table(q, "Rango RSI", "Rango RSI"),
+        "volume": group_quality_table(q, "Rango volumen", "Volumen relativo"),
+    }
+
+def quality_summary_cards(signals):
+    resolved = add_r_result(resolved_only(signals))
+    if resolved.empty:
+        st.info("Todavía no hay señales resueltas suficientes para evaluar calidad.")
+        return
+
+    # Find best score bucket by average R, requiring at least 3 samples
+    resolved["Rango score"] = resolved["score"].map(classify_score_bucket)
+    stats = (
+        resolved.groupby("Rango score")
+        .agg(Señales=("id","count"), R_promedio=("R","mean"), R_total=("R","sum"))
+        .reset_index()
+    )
+    eligible = stats[stats["Señales"] >= 3]
+    best_bucket = "—"
+    best_r = 0.0
+    if not eligible.empty:
+        best = eligible.sort_values("R_promedio", ascending=False).iloc[0]
+        best_bucket = best["Rango score"]
+        best_r = float(best["R_promedio"])
+
+    cross = resolved.copy()
+    cross["Cross"] = cross["cross_confirmed"].fillna(False)
+    cross_stats = cross.groupby("Cross")["R"].agg(["count","mean","sum"]).reset_index()
+    cross_yes = cross_stats[cross_stats["Cross"]==True]
+    cross_no = cross_stats[cross_stats["Cross"]==False]
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Muestra resuelta", len(resolved))
+    c2.metric("Mejor rango score", best_bucket, f"{best_r:+.2f}R/señal" if best_bucket != "—" else None)
+    if not cross_yes.empty:
+        c3.metric("Cross ✅ R/señal", f"{float(cross_yes.iloc[0]['mean']):+.2f}R")
+    else:
+        c3.metric("Cross ✅ R/señal", "—")
+    if not cross_no.empty:
+        c4.metric("Sin Cross R/señal", f"{float(cross_no.iloc[0]['mean']):+.2f}R")
+    else:
+        c4.metric("Sin Cross R/señal", "—")
+
+
 def header():
     now = datetime.now(timezone.utc)
     c1,c2,c3,c4 = st.columns([1.4,1,1,1])
@@ -334,6 +474,9 @@ if page == "Dashboard":
     st.markdown("### 📊 Performance del monitor")
     performance_cards()
 
+    st.markdown("### 🧪 Calidad de las señales")
+    quality_summary_cards(signals)
+
     left,right=st.columns([1.45,1])
     with left:
         st.markdown("### 📡 Radar de mercado")
@@ -390,6 +533,73 @@ elif page == "Historial y performance":
         signal_table(signals[signals["status"].isin(status_filter)], 620)
     else:
         st.info("Todavía no hay señales registradas.")
+
+
+elif page == "Calidad de señales":
+    st.markdown("## 🧪 Calidad de las señales")
+    st.caption(
+        "Diagnóstico estadístico sin modificar las reglas del scanner. "
+        "Las métricas usan únicamente señales resueltas: TP2, TP1+BE y STOP."
+    )
+
+    quality_summary_cards(signals)
+    analyses = quality_analysis(signals)
+
+    if not analyses:
+        st.info("Todavía no hay señales suficientes.")
+    else:
+        tabs = st.tabs(["Score", "Exchange", "Cross", "RSI", "Volumen"])
+
+        with tabs[0]:
+            st.markdown("### Resultado por rango de score")
+            if analyses["score"].empty:
+                st.info("Sin datos.")
+            else:
+                order = {"84–87.9":0, "88–91.9":1, "92+":2, "<84":3, "Sin score":4}
+                t = analyses["score"].copy()
+                t["_o"] = t["Rango score"].map(order).fillna(99)
+                t = t.sort_values("_o").drop(columns="_o")
+                st.dataframe(t, use_container_width=True, hide_index=True)
+
+        with tabs[1]:
+            st.markdown("### KuCoin vs MEXC")
+            if analyses["exchange"].empty:
+                st.info("Sin datos.")
+            else:
+                st.dataframe(
+                    analyses["exchange"].sort_values("R acumulado", ascending=False),
+                    use_container_width=True, hide_index=True
+                )
+
+        with tabs[2]:
+            st.markdown("### Confirmación cross-exchange")
+            if analyses["cross"].empty:
+                st.info("Sin datos.")
+            else:
+                st.dataframe(
+                    analyses["cross"].sort_values("R acumulado", ascending=False),
+                    use_container_width=True, hide_index=True
+                )
+
+        with tabs[3]:
+            st.markdown("### Resultado por RSI al generar la señal")
+            if analyses["rsi"].empty:
+                st.info("Sin datos.")
+            else:
+                st.dataframe(analyses["rsi"], use_container_width=True, hide_index=True)
+
+        with tabs[4]:
+            st.markdown("### Resultado por volumen relativo")
+            if analyses["volume"].empty:
+                st.info("Sin datos.")
+            else:
+                st.dataframe(analyses["volume"], use_container_width=True, hide_index=True)
+
+    st.info(
+        "No optimices el scanner todavía. Esperá al menos ~150 señales cerradas y "
+        "buscá consistencia en R promedio, win rate y tamaño de muestra antes de cambiar filtros."
+    )
+
 
 elif page == "Radar de mercado":
     st.markdown("## 📡 Radar de mercado")
@@ -448,5 +658,7 @@ elif page == "Configuración":
 st.divider()
 st.caption(
     "Performance simulada: TP2 = +2,0R · TP1 + break-even = +0,75R · STOP = -1,0R. "
-    "EXPIRED y AMBIGUOUS se excluyen de la tasa de acierto. No ejecuta órdenes reales."
+    "La sección Calidad usa sólo señales resueltas. EXPIRED y AMBIGUOUS se excluyen. "
+    "No ejecuta órdenes reales."
 )
+
